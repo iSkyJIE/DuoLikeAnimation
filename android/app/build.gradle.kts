@@ -10,8 +10,8 @@ android {
         applicationId = "com.iskyjie.duolikeanimation"
         minSdk = 33
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.0.6-live-tilt"
+        versionCode = 8
+        versionName = "1.0.7-perspective-fold"
     }
 
     buildTypes {
