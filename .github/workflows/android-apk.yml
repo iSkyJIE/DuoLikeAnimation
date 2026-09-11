@@ -36,9 +36,17 @@ jobs:
         working-directory: android
         run: gradle assembleRelease --stacktrace
 
-      - name: Upload APK
+      - name: Create signed diagnostic APK
+        run: |
+          PASS=$(openssl rand -hex 16)
+          keytool -genkeypair -keystore diagnostic-ci.jks -storepass "$PASS" -keypass "$PASS" -alias duo_diag -keyalg RSA -keysize 4096 -validity 3650 -dname "CN=DuoLikeAnimation Diagnostic, OU=Android Test, O=iSkyJIE, C=US"
+          $ANDROID_SDK_ROOT/build-tools/35.0.0/zipalign -f -p 4 android/app/build/outputs/apk/release/app-release-unsigned.apk DuoLikeAnimation-v1.0.8-aligned.apk
+          $ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner sign --ks diagnostic-ci.jks --ks-key-alias duo_diag --ks-pass "pass:$PASS" --key-pass "pass:$PASS" --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out DuoLikeAnimation-v1.0.8-INSTALLABLE.apk DuoLikeAnimation-v1.0.8-aligned.apk
+          $ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner verify --verbose --print-certs DuoLikeAnimation-v1.0.8-INSTALLABLE.apk
+
+      - name: Upload signed APK
         uses: actions/upload-artifact@v4
         with:
-          name: DuoLikeAnimation-Android-APK
-          path: android/app/build/outputs/apk/release/app-release-unsigned.apk
+          name: DuoLikeAnimation-Android-v1.0.8-INSTALLABLE
+          path: DuoLikeAnimation-v1.0.8-INSTALLABLE.apk
           if-no-files-found: error
