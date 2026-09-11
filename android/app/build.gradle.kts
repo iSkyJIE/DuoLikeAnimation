@@ -10,8 +10,8 @@ android {
         applicationId = "com.iskyjie.duolikeanimation"
         minSdk = 33
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.0.3-safe-boot"
+        versionCode = 5
+        versionName = "1.0.4-static-view"
     }
 
     buildTypes {
