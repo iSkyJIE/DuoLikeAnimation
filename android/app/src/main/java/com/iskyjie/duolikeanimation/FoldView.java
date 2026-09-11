@@ -18,9 +18,15 @@ public final class FoldView extends View implements SensorEventListener {
     private String sensorStatus = "Sensor initializing...";
     private int sensorEvents = 0;
 
+    private final float[] referenceQ = new float[4];
+    private final float[] currentQ = new float[4];
+    private boolean hasReference = false;
+    private float tiltRadians = 0f;
+    private static final float MAX_TILT = (float) Math.toRadians(45.0);
+
     public FoldView(Context context) {
         super(context);
-        setBackgroundColor(Color.rgb(242, 242, 247));
+        setBackgroundColor(Color.BLACK);
         sensorManager = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
         Sensor s = null;
         if (sensorManager != null) {
@@ -36,7 +42,7 @@ public final class FoldView extends View implements SensorEventListener {
         super.onAttachedToWindow();
         try {
             if (sensorManager != null && rotationSensor != null) {
-                boolean ok = sensorManager.registerListener(this, rotationSensor, SensorManager.SENSOR_DELAY_NORMAL);
+                boolean ok = sensorManager.registerListener(this, rotationSensor, SensorManager.SENSOR_DELAY_GAME);
                 sensorStatus = ok ? "Sensor registered" : "Sensor register failed";
                 invalidate();
             }
@@ -57,10 +63,29 @@ public final class FoldView extends View implements SensorEventListener {
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-
         float d = getResources().getDisplayMetrics().density;
         float w = getWidth();
         float h = getHeight();
+        if (w <= 0f || h <= 0f) return;
+
+        canvas.drawColor(Color.BLACK);
+
+        float normalized = Math.min(1f, Math.abs(tiltRadians) / MAX_TILT);
+        float scaleX = 1f - 0.28f * normalized;
+        float pivotX = tiltRadians >= 0f ? w : 0f;
+        float shift = (tiltRadians >= 0f ? -1f : 1f) * 10f * d * normalized;
+
+        int save = canvas.save();
+        canvas.translate(shift, 0f);
+        canvas.scale(scaleX, 1f, pivotX, h * 0.5f);
+        drawDashboard(canvas, d, w, h);
+        canvas.restoreToCount(save);
+
+        drawDebugOverlay(canvas, d, w, h);
+    }
+
+    private void drawDashboard(Canvas canvas, float d, float w, float h) {
+        canvas.drawColor(Color.rgb(242, 242, 247));
         float left = 24f * d;
         float right = w - 24f * d;
 
@@ -72,36 +97,113 @@ public final class FoldView extends View implements SensorEventListener {
         paint.setFakeBoldText(false);
         paint.setTextSize(16f * d);
         paint.setColor(Color.rgb(90, 90, 100));
-        canvas.drawText("SENSOR READ TEST", left, 125f * d, paint);
+        canvas.drawText("LIVE TILT TRANSFORM TEST", left, 125f * d, paint);
 
         paint.setColor(Color.WHITE);
-        RectF card = new RectF(left, 165f * d, right, Math.min(h - 80f * d, 430f * d));
+        RectF card = new RectF(left, 165f * d, right, Math.min(h - 120f * d, 455f * d));
         canvas.drawRoundRect(card, 24f * d, 24f * d, paint);
 
         paint.setColor(Color.rgb(0, 122, 255));
         paint.setTextSize(22f * d);
         paint.setFakeBoldText(true);
-        canvas.drawText("Canvas OK", card.left + 22f * d, card.top + 48f * d, paint);
+        canvas.drawText("Motion OK", card.left + 22f * d, card.top + 48f * d, paint);
 
         paint.setFakeBoldText(false);
         paint.setTextSize(15f * d);
         paint.setColor(Color.rgb(70, 70, 80));
-        canvas.drawText(sensorStatus, card.left + 22f * d, card.top + 88f * d, paint);
-        canvas.drawText("Sensor events: " + sensorEvents, card.left + 22f * d, card.top + 118f * d, paint);
-        canvas.drawText("No fold transform", card.left + 22f * d, card.top + 148f * d, paint);
-        canvas.drawText("No shader / AGSL", card.left + 22f * d, card.top + 178f * d, paint);
+        canvas.drawText("Tilt phone left / right", card.left + 22f * d, card.top + 88f * d, paint);
+        canvas.drawText("Canvas transform only", card.left + 22f * d, card.top + 118f * d, paint);
+        canvas.drawText("No shader / AGSL", card.left + 22f * d, card.top + 148f * d, paint);
+        canvas.drawText("No blur / glass refraction", card.left + 22f * d, card.top + 178f * d, paint);
 
-        paint.setColor(sensorEvents > 0 ? Color.rgb(52, 199, 89) : Color.rgb(255, 149, 0));
+        paint.setColor(Color.rgb(52, 199, 89));
         canvas.drawCircle(card.right - 48f * d, card.top + 48f * d, 16f * d, paint);
+
+        float y = card.bottom + 28f * d;
+        float gap = 12f * d;
+        float tileW = (right - left - gap) / 2f;
+        String[] labels = {"Steps", "Focus", "Sleep", "Water"};
+        String[] values = {"8,412", "3h 05m", "7h 20m", "1.8 L"};
+        for (int i = 0; i < 4; i++) {
+            int row = i / 2;
+            int col = i % 2;
+            float x = left + col * (tileW + gap);
+            float ty = y + row * (88f * d + gap);
+            paint.setColor(Color.WHITE);
+            canvas.drawRoundRect(new RectF(x, ty, x + tileW, ty + 88f * d), 16f * d, 16f * d, paint);
+            paint.setColor(Color.rgb(90, 90, 100));
+            paint.setTextSize(13f * d);
+            canvas.drawText(labels[i], x + 14f * d, ty + 26f * d, paint);
+            paint.setColor(Color.BLACK);
+            paint.setTextSize(23f * d);
+            paint.setFakeBoldText(true);
+            canvas.drawText(values[i], x + 14f * d, ty + 62f * d, paint);
+            paint.setFakeBoldText(false);
+        }
+    }
+
+    private void drawDebugOverlay(Canvas canvas, float d, float w, float h) {
+        paint.setColor(0xCC000000);
+        RectF overlay = new RectF(12f * d, h - 76f * d, w - 12f * d, h - 14f * d);
+        canvas.drawRoundRect(overlay, 16f * d, 16f * d, paint);
+        paint.setColor(Color.WHITE);
+        paint.setTextSize(13f * d);
+        paint.setFakeBoldText(true);
+        canvas.drawText(sensorStatus, overlay.left + 14f * d, overlay.top + 23f * d, paint);
+        paint.setFakeBoldText(false);
+        String line = "events " + sensorEvents + "   tilt " + Math.round(Math.toDegrees(tiltRadians)) + " deg";
+        canvas.drawText(line, overlay.left + 14f * d, overlay.top + 46f * d, paint);
     }
 
     @Override
     public void onSensorChanged(SensorEvent event) {
-        sensorEvents++;
-        if (sensorEvents == 1) sensorStatus = "Sensor events received";
-        if ((sensorEvents % 5) == 0 || sensorEvents < 5) invalidate();
+        try {
+            SensorManager.getQuaternionFromVector(currentQ, event.values);
+            normalize(currentQ);
+            sensorEvents++;
+
+            if (!hasReference) {
+                System.arraycopy(currentQ, 0, referenceQ, 0, 4);
+                hasReference = true;
+                sensorStatus = "Sensor + tilt active";
+                tiltRadians = 0f;
+                invalidate();
+                return;
+            }
+
+            float[] rel = multiply(conjugate(referenceQ), currentQ);
+            float sinY = 2f * (rel[0] * rel[2] - rel[3] * rel[1]);
+            sinY = Math.max(-1f, Math.min(1f, sinY));
+            float measured = (float) Math.asin(sinY);
+            measured = Math.max(-MAX_TILT, Math.min(MAX_TILT, measured));
+            tiltRadians = tiltRadians * 0.82f + measured * 0.18f;
+            invalidate();
+        } catch (Throwable t) {
+            sensorStatus = "Motion exception: " + t.getClass().getSimpleName();
+            invalidate();
+        }
     }
 
     @Override
     public void onAccuracyChanged(Sensor sensor, int accuracy) { }
+
+    private static float[] conjugate(float[] q) {
+        return new float[]{q[0], -q[1], -q[2], -q[3]};
+    }
+
+    private static float[] multiply(float[] a, float[] b) {
+        return new float[]{
+                a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+                a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+                a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+                a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0]
+        };
+    }
+
+    private static void normalize(float[] q) {
+        float n = (float) Math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+        if (n > 0f) {
+            for (int i = 0; i < 4; i++) q[i] /= n;
+        }
+    }
 }
