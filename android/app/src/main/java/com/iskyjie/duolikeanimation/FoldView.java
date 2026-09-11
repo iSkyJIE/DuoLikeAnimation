@@ -2,19 +2,16 @@ package com.iskyjie.duolikeanimation;
 
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.graphics.BitmapShader;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.RectF;
-import android.graphics.RuntimeShader;
 import android.graphics.Shader;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
-import android.os.Build;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -23,8 +20,6 @@ public final class FoldView extends View implements SensorEventListener {
     private final Sensor rotationSensor;
     private final Paint drawPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final Paint uiPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private RuntimeShader foldShader;
-    private String shaderError;
 
     private Bitmap uiBitmap;
     private Canvas uiCanvas;
@@ -37,137 +32,81 @@ public final class FoldView extends View implements SensorEventListener {
 
     private static final float MAX_TILT = (float)Math.toRadians(55.0);
 
-    // Kept intentionally conservative for Samsung/Android RuntimeShader drivers.
-    private static final String AGSL = """
-        uniform shader content;
-        uniform float2 resolution;
-        uniform float angle;
-        uniform float eyeDistance;
-        uniform float blurSpread;
-        uniform float darkening;
-
-        float hash21(float2 p) {
-            return fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
-        }
-
-        half4 main(float2 p) {
-            float tilt = abs(angle);
-            if (tilt < 0.0001) {
-                half4 c0 = content.eval(p);
-                return half4(c0.rgb, 1.0);
-            }
-
-            float hingeX = 0.0;
-            float side = 1.0;
-            if (angle > 0.0) {
-                hingeX = resolution.x;
-                side = -1.0;
-            }
-
-            float d = abs(p.x - hingeX);
-            float gx = hingeX + side * d * cos(tilt);
-            float gz = d * sin(tilt);
-            float depth = eyeDistance - gz;
-            if (depth <= 0.001) return half4(0.0, 0.0, 0.0, 1.0);
-
-            float t = eyeDistance / depth;
-            float2 eyeXY = resolution * 0.5;
-            float2 hit = eyeXY + (float2(gx, p.y) - eyeXY) * t;
-            float radius = blurSpread * gz;
-
-            if (hit.x < -radius || hit.y < -radius ||
-                hit.x > resolution.x + radius || hit.y > resolution.y + radius) {
-                return half4(0.0, 0.0, 0.0, 1.0);
-            }
-
-            float attenuation = max(1.0 - darkening * radius, 0.0);
-            if (radius < 0.5) {
-                half4 c1 = content.eval(hit);
-                return half4(c1.rgb * half(attenuation), 1.0);
-            }
-
-            float rotation = hash21(p) * 6.28318530718;
-            half3 sum = half3(0.0, 0.0, 0.0);
-            for (int i = 0; i < 16; i++) {
-                float fi = float(i);
-                float r = radius * sqrt((fi + 0.5) / 16.0);
-                float a = fi * 2.39996322973 + rotation;
-                float2 off = r * float2(cos(a), sin(a));
-                sum += content.eval(hit + off).rgb;
-            }
-            return half4((sum / half(16.0)) * half(attenuation), 1.0);
-        }
-        """;
-
     public FoldView(Context context) {
         super(context);
-        setLayerType(View.LAYER_TYPE_HARDWARE, null);
-
-        // RuntimeShader source is compiled here on-device, not by Gradle. Never let a
-        // vendor graphics-driver rejection crash the whole app at startup.
-        if (Build.VERSION.SDK_INT >= 33) {
-            try {
-                foldShader = new RuntimeShader(AGSL);
-            } catch (Throwable t) {
-                foldShader = null;
-                shaderError = t.getClass().getSimpleName();
-            }
-        }
-
+        setLayerType(View.LAYER_TYPE_SOFTWARE, null);
         sensorManager = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
-        Sensor s = sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR);
-        if (s == null) s = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+        Sensor s = null;
+        if (sensorManager != null) {
+            s = sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR);
+            if (s == null) s = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+        }
         rotationSensor = s;
         setBackgroundColor(Color.BLACK);
     }
 
     @Override protected void onAttachedToWindow() {
         super.onAttachedToWindow();
-        if (rotationSensor != null) sensorManager.registerListener(this, rotationSensor, SensorManager.SENSOR_DELAY_GAME);
+        try {
+            if (sensorManager != null && rotationSensor != null) {
+                sensorManager.registerListener(this, rotationSensor, SensorManager.SENSOR_DELAY_GAME);
+            }
+        } catch (Throwable ignored) { }
     }
 
     @Override protected void onDetachedFromWindow() {
-        sensorManager.unregisterListener(this);
+        try { if (sensorManager != null) sensorManager.unregisterListener(this); }
+        catch (Throwable ignored) { }
         super.onDetachedFromWindow();
     }
 
     @Override protected void onSizeChanged(int w, int h, int oldw, int oldh) {
-        if (w > 0 && h > 0) {
+        if (w <= 0 || h <= 0) return;
+        try {
             uiBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
             uiCanvas = new Canvas(uiBitmap);
             renderDemoUi(w, h);
+        } catch (Throwable t) {
+            uiBitmap = null;
+            uiCanvas = null;
         }
     }
 
     @Override protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        if (uiBitmap == null) return;
-        float a = manualMode ? manualAngle : angle;
-        if (foldShader == null) {
-            canvas.drawBitmap(uiBitmap, 0, 0, drawPaint);
-            drawOverlay(canvas, a);
+        if (uiBitmap == null) {
+            canvas.drawColor(Color.rgb(242, 242, 247));
             return;
         }
-        try {
-            BitmapShader source = new BitmapShader(uiBitmap, Shader.TileMode.DECAL, Shader.TileMode.DECAL);
-            foldShader.setInputShader("content", source);
-            foldShader.setFloatUniform("resolution", getWidth(), getHeight());
-            foldShader.setFloatUniform("angle", a);
-            float pxPerMm = getResources().getDisplayMetrics().xdpi / 25.4f;
-            foldShader.setFloatUniform("eyeDistance", 320f * pxPerMm);
-            foldShader.setFloatUniform("blurSpread", 0.12f);
-            foldShader.setFloatUniform("darkening", 0.0065f);
-            drawPaint.setShader(foldShader);
-            canvas.drawRect(0, 0, getWidth(), getHeight(), drawPaint);
-            drawPaint.setShader(null);
-        } catch (Throwable t) {
-            // Some OEM drivers can reject a valid shader only when uniforms/input are bound.
-            drawPaint.setShader(null);
-            foldShader = null;
-            shaderError = t.getClass().getSimpleName();
-            canvas.drawBitmap(uiBitmap, 0, 0, drawPaint);
-        }
+        float a = manualMode ? manualAngle : angle;
+        drawSafeFold(canvas, a);
         drawOverlay(canvas, a);
+    }
+
+    private void drawSafeFold(Canvas canvas, float a) {
+        float abs = Math.min(Math.abs(a), MAX_TILT);
+        float squeeze = 1f - 0.18f * (abs / MAX_TILT);
+        int save = canvas.save();
+        if (a >= 0f) canvas.scale(squeeze, 1f, getWidth(), getHeight() * 0.5f);
+        else canvas.scale(squeeze, 1f, 0f, getHeight() * 0.5f);
+        canvas.drawBitmap(uiBitmap, 0f, 0f, drawPaint);
+        canvas.restoreToCount(save);
+
+        if (abs > 0.01f) {
+            float strength = Math.min(0.42f, abs / MAX_TILT * 0.42f);
+            int alpha = Math.round(255f * strength);
+            int width = Math.max(1, getWidth() / 5);
+            if (a >= 0f) {
+                uiPaint.setShader(new LinearGradient(getWidth()-width, 0, getWidth(), 0,
+                        Color.TRANSPARENT, Color.argb(alpha,0,0,0), Shader.TileMode.CLAMP));
+                canvas.drawRect(getWidth()-width, 0, getWidth(), getHeight(), uiPaint);
+            } else {
+                uiPaint.setShader(new LinearGradient(0, 0, width, 0,
+                        Color.argb(alpha,0,0,0), Color.TRANSPARENT, Shader.TileMode.CLAMP));
+                canvas.drawRect(0, 0, width, getHeight(), uiPaint);
+            }
+            uiPaint.setShader(null);
+        }
     }
 
     private void renderDemoUi(int w, int h) {
@@ -216,12 +155,12 @@ public final class FoldView extends View implements SensorEventListener {
         uiPaint.setColor(Color.WHITE);
         uiPaint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         uiPaint.setTextSize(18*d);
-        c.drawText("Frosted glass fold",x+18*d,y+35*d,uiPaint);
+        c.drawText("Safe fold demo",x+18*d,y+35*d,uiPaint);
         uiPaint.setTypeface(android.graphics.Typeface.DEFAULT);
         uiPaint.setTextSize(13*d);
         c.drawText("Tilt the phone around its vertical axis.",x+18*d,y+66*d,uiPaint);
-        c.drawText("The interface stays put while the screen",x+18*d,y+86*d,uiPaint);
-        c.drawText("behaves like a pane of frosted glass.",x+18*d,y+106*d,uiPaint);
+        c.drawText("This build uses standard Android Canvas",x+18*d,y+86*d,uiPaint);
+        c.drawText("and contains no RuntimeShader / AGSL.",x+18*d,y+106*d,uiPaint);
         float barX=x+18*d;
         for(int i=0;i<12;i++){
             float bh=(18+((i*37)%46))*d;
@@ -257,19 +196,15 @@ public final class FoldView extends View implements SensorEventListener {
 
     private void drawOverlay(Canvas canvas, float a) {
         float d = getResources().getDisplayMetrics().density;
+        uiPaint.setShader(null);
         uiPaint.setColor(0xaa000000);
-        canvas.drawRoundRect(new RectF(12*d,getHeight()-72*d,getWidth()-12*d,getHeight()-14*d),16*d,16*d,uiPaint);
+        canvas.drawRoundRect(new RectF(12*d,getHeight()-68*d,getWidth()-12*d,getHeight()-14*d),16*d,16*d,uiPaint);
         uiPaint.setColor(Color.WHITE);
         uiPaint.setTextSize(13*d);
         uiPaint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         String mode = manualMode ? "MANUAL" : "MOTION";
-        String s = mode + "   tilt " + Math.round(Math.toDegrees(a)) + " deg   ·   tap center to recalibrate";
-        canvas.drawText(s,26*d,getHeight()-42*d,uiPaint);
-        if (shaderError != null) {
-            uiPaint.setTextSize(10*d);
-            uiPaint.setTypeface(android.graphics.Typeface.DEFAULT);
-            canvas.drawText("Shader fallback: " + shaderError,26*d,getHeight()-24*d,uiPaint);
-        }
+        String s = mode + "   tilt " + Math.round(Math.toDegrees(a)) + " deg   -   SAFE CANVAS";
+        canvas.drawText(s,26*d,getHeight()-36*d,uiPaint);
     }
 
     @Override public boolean onTouchEvent(MotionEvent e) {
@@ -320,9 +255,7 @@ public final class FoldView extends View implements SensorEventListener {
             measured = Math.max(-MAX_TILT, Math.min(MAX_TILT, measured));
             angle = angle*0.82f + measured*0.18f;
             if (!manualMode) invalidate();
-        } catch (Throwable ignored) {
-            // Sensor glitches must not take down the demo.
-        }
+        } catch (Throwable ignored) { }
     }
 
     @Override public void onAccuracyChanged(Sensor sensor, int accuracy) { }
