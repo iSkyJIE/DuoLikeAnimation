@@ -23,19 +23,21 @@ public final class FoldView extends View implements SensorEventListener {
     private final Sensor rotationSensor;
     private final Paint drawPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
     private final Paint uiPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final RuntimeShader foldShader;
+    private RuntimeShader foldShader;
+    private String shaderError;
 
     private Bitmap uiBitmap;
     private Canvas uiCanvas;
     private float angle = 0f;
     private boolean hasReference = false;
-    private final float[] referenceQ = new float[4]; // w,x,y,z
+    private final float[] referenceQ = new float[4];
     private final float[] currentQ = new float[4];
     private boolean manualMode = false;
     private float manualAngle = 0f;
 
     private static final float MAX_TILT = (float)Math.toRadians(55.0);
 
+    // Kept intentionally conservative for Samsung/Android RuntimeShader drivers.
     private static final String AGSL = """
         uniform shader content;
         uniform float2 resolution;
@@ -44,63 +46,74 @@ public final class FoldView extends View implements SensorEventListener {
         uniform float blurSpread;
         uniform float darkening;
 
-        const float PI2 = 6.28318530718;
-        const float GOLDEN = 2.39996322973;
-
         float hash21(float2 p) {
             return fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
         }
 
-        half4 sampleOpaque(float2 p) {
-            half4 c = content.eval(p);
-            return half4(c.rgb, 1.0);
-        }
-
-        half4 main(float2 fragCoord) {
+        half4 main(float2 p) {
             float tilt = abs(angle);
-            if (tilt < 0.0001) return sampleOpaque(fragCoord);
+            if (tilt < 0.0001) {
+                half4 c0 = content.eval(p);
+                return half4(c0.rgb, 1.0);
+            }
 
-            bool hingeRight = angle > 0.0;
-            float hingeX = hingeRight ? resolution.x : 0.0;
-            float side = hingeRight ? -1.0 : 1.0;
-            float d = abs(fragCoord.x - hingeX);
+            float hingeX = 0.0;
+            float side = 1.0;
+            if (angle > 0.0) {
+                hingeX = resolution.x;
+                side = -1.0;
+            }
 
-            float3 glass = float3(hingeX + side * d * cos(tilt), fragCoord.y, d * sin(tilt));
-            float3 eye = float3(resolution * 0.5, eyeDistance);
-            float depth = eye.z - glass.z;
+            float d = abs(p.x - hingeX);
+            float gx = hingeX + side * d * cos(tilt);
+            float gz = d * sin(tilt);
+            float depth = eyeDistance - gz;
             if (depth <= 0.001) return half4(0.0, 0.0, 0.0, 1.0);
 
-            float t = eye.z / depth;
-            float2 hit = eye.xy + (glass.xy - eye.xy) * t;
-            float radius = blurSpread * glass.z;
+            float t = eyeDistance / depth;
+            float2 eyeXY = resolution * 0.5;
+            float2 hit = eyeXY + (float2(gx, p.y) - eyeXY) * t;
+            float radius = blurSpread * gz;
 
-            if (any(hit < -radius) || any(hit > resolution + radius)) {
+            if (hit.x < -radius || hit.y < -radius ||
+                hit.x > resolution.x + radius || hit.y > resolution.y + radius) {
                 return half4(0.0, 0.0, 0.0, 1.0);
             }
 
-            half attenuation = half(max(1.0 - darkening * radius, 0.0));
+            float attenuation = max(1.0 - darkening * radius, 0.0);
             if (radius < 0.5) {
-                half4 c = content.eval(hit);
-                return half4(c.rgb * attenuation, 1.0);
+                half4 c1 = content.eval(hit);
+                return half4(c1.rgb * half(attenuation), 1.0);
             }
 
-            float rotation = hash21(fragCoord) * PI2;
-            half3 sum = half3(0.0);
-            const int taps = 24;
-            for (int i = 0; i < taps; ++i) {
-                float r = radius * sqrt((float(i) + 0.5) / float(taps));
-                float a = float(i) * GOLDEN + rotation;
+            float rotation = hash21(p) * 6.28318530718;
+            half3 sum = half3(0.0, 0.0, 0.0);
+            for (int i = 0; i < 16; i++) {
+                float fi = float(i);
+                float r = radius * sqrt((fi + 0.5) / 16.0);
+                float a = fi * 2.39996322973 + rotation;
                 float2 off = r * float2(cos(a), sin(a));
                 sum += content.eval(hit + off).rgb;
             }
-            return half4((sum / half(taps)) * attenuation, 1.0);
+            return half4((sum / half(16.0)) * half(attenuation), 1.0);
         }
         """;
 
     public FoldView(Context context) {
         super(context);
         setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        foldShader = Build.VERSION.SDK_INT >= 33 ? new RuntimeShader(AGSL) : null;
+
+        // RuntimeShader source is compiled here on-device, not by Gradle. Never let a
+        // vendor graphics-driver rejection crash the whole app at startup.
+        if (Build.VERSION.SDK_INT >= 33) {
+            try {
+                foldShader = new RuntimeShader(AGSL);
+            } catch (Throwable t) {
+                foldShader = null;
+                shaderError = t.getClass().getSimpleName();
+            }
+        }
+
         sensorManager = (SensorManager) context.getSystemService(Context.SENSOR_SERVICE);
         Sensor s = sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR);
         if (s == null) s = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
@@ -132,19 +145,28 @@ public final class FoldView extends View implements SensorEventListener {
         float a = manualMode ? manualAngle : angle;
         if (foldShader == null) {
             canvas.drawBitmap(uiBitmap, 0, 0, drawPaint);
+            drawOverlay(canvas, a);
             return;
         }
-        BitmapShader source = new BitmapShader(uiBitmap, Shader.TileMode.DECAL, Shader.TileMode.DECAL);
-        foldShader.setInputShader("content", source);
-        foldShader.setFloatUniform("resolution", getWidth(), getHeight());
-        foldShader.setFloatUniform("angle", a);
-        float pxPerMm = getResources().getDisplayMetrics().xdpi / 25.4f;
-        foldShader.setFloatUniform("eyeDistance", 320f * pxPerMm);
-        foldShader.setFloatUniform("blurSpread", 0.12f);
-        foldShader.setFloatUniform("darkening", 0.0065f);
-        drawPaint.setShader(foldShader);
-        canvas.drawRect(0, 0, getWidth(), getHeight(), drawPaint);
-        drawPaint.setShader(null);
+        try {
+            BitmapShader source = new BitmapShader(uiBitmap, Shader.TileMode.DECAL, Shader.TileMode.DECAL);
+            foldShader.setInputShader("content", source);
+            foldShader.setFloatUniform("resolution", getWidth(), getHeight());
+            foldShader.setFloatUniform("angle", a);
+            float pxPerMm = getResources().getDisplayMetrics().xdpi / 25.4f;
+            foldShader.setFloatUniform("eyeDistance", 320f * pxPerMm);
+            foldShader.setFloatUniform("blurSpread", 0.12f);
+            foldShader.setFloatUniform("darkening", 0.0065f);
+            drawPaint.setShader(foldShader);
+            canvas.drawRect(0, 0, getWidth(), getHeight(), drawPaint);
+            drawPaint.setShader(null);
+        } catch (Throwable t) {
+            // Some OEM drivers can reject a valid shader only when uniforms/input are bound.
+            drawPaint.setShader(null);
+            foldShader = null;
+            shaderError = t.getClass().getSimpleName();
+            canvas.drawBitmap(uiBitmap, 0, 0, drawPaint);
+        }
         drawOverlay(canvas, a);
     }
 
@@ -194,7 +216,7 @@ public final class FoldView extends View implements SensorEventListener {
         uiPaint.setColor(Color.WHITE);
         uiPaint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         uiPaint.setTextSize(18*d);
-        c.drawText("✦  Frosted glass fold",x+18*d,y+35*d,uiPaint);
+        c.drawText("Frosted glass fold",x+18*d,y+35*d,uiPaint);
         uiPaint.setTypeface(android.graphics.Typeface.DEFAULT);
         uiPaint.setTextSize(13*d);
         c.drawText("Tilt the phone around its vertical axis.",x+18*d,y+66*d,uiPaint);
@@ -236,13 +258,18 @@ public final class FoldView extends View implements SensorEventListener {
     private void drawOverlay(Canvas canvas, float a) {
         float d = getResources().getDisplayMetrics().density;
         uiPaint.setColor(0xaa000000);
-        canvas.drawRoundRect(new RectF(12*d,getHeight()-66*d,getWidth()-12*d,getHeight()-14*d),16*d,16*d,uiPaint);
+        canvas.drawRoundRect(new RectF(12*d,getHeight()-72*d,getWidth()-12*d,getHeight()-14*d),16*d,16*d,uiPaint);
         uiPaint.setColor(Color.WHITE);
         uiPaint.setTextSize(13*d);
         uiPaint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         String mode = manualMode ? "MANUAL" : "MOTION";
-        String s = mode + "   tilt " + Math.round(Math.toDegrees(a)) + "°   ·   tap to recalibrate   ·   drag for manual";
-        canvas.drawText(s,26*d,getHeight()-34*d,uiPaint);
+        String s = mode + "   tilt " + Math.round(Math.toDegrees(a)) + " deg   ·   tap center to recalibrate";
+        canvas.drawText(s,26*d,getHeight()-42*d,uiPaint);
+        if (shaderError != null) {
+            uiPaint.setTextSize(10*d);
+            uiPaint.setTypeface(android.graphics.Typeface.DEFAULT);
+            canvas.drawText("Shader fallback: " + shaderError,26*d,getHeight()-24*d,uiPaint);
+        }
     }
 
     @Override public boolean onTouchEvent(MotionEvent e) {
@@ -275,23 +302,27 @@ public final class FoldView extends View implements SensorEventListener {
     }
 
     @Override public void onSensorChanged(SensorEvent event) {
-        SensorManager.getQuaternionFromVector(currentQ, event.values);
-        normalize(currentQ);
-        if (!hasReference) {
-            System.arraycopy(currentQ,0,referenceQ,0,4);
-            hasReference = true;
-            angle = 0f;
-            invalidate();
-            return;
+        try {
+            SensorManager.getQuaternionFromVector(currentQ, event.values);
+            normalize(currentQ);
+            if (!hasReference) {
+                System.arraycopy(currentQ,0,referenceQ,0,4);
+                hasReference = true;
+                angle = 0f;
+                invalidate();
+                return;
+            }
+            float[] rel = multiply(conjugate(referenceQ), currentQ);
+            float w=rel[0], x=rel[1], y=rel[2], z=rel[3];
+            float sinY = 2f*(w*y - z*x);
+            sinY = Math.max(-1f, Math.min(1f, sinY));
+            float measured = (float)Math.asin(sinY);
+            measured = Math.max(-MAX_TILT, Math.min(MAX_TILT, measured));
+            angle = angle*0.82f + measured*0.18f;
+            if (!manualMode) invalidate();
+        } catch (Throwable ignored) {
+            // Sensor glitches must not take down the demo.
         }
-        float[] rel = multiply(conjugate(referenceQ), currentQ);
-        float w=rel[0], x=rel[1], y=rel[2], z=rel[3];
-        float sinY = 2f*(w*y - z*x);
-        sinY = Math.max(-1f, Math.min(1f, sinY));
-        float measured = (float)Math.asin(sinY);
-        measured = Math.max(-MAX_TILT, Math.min(MAX_TILT, measured));
-        angle = angle*0.82f + measured*0.18f;
-        if (!manualMode) invalidate();
     }
 
     @Override public void onAccuracyChanged(Sensor sensor, int accuracy) { }
