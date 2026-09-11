@@ -3,6 +3,7 @@ package com.iskyjie.duolikeanimation;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.hardware.Sensor;
@@ -22,7 +23,11 @@ public final class FoldView extends View implements SensorEventListener {
     private final float[] currentQ = new float[4];
     private boolean hasReference = false;
     private float tiltRadians = 0f;
-    private static final float MAX_TILT = (float) Math.toRadians(45.0);
+    private static final float MAX_TILT = (float) Math.toRadians(50.0);
+
+    private final Matrix foldMatrix = new Matrix();
+    private final float[] src = new float[8];
+    private final float[] dst = new float[8];
 
     public FoldView(Context context) {
         super(context);
@@ -70,18 +75,45 @@ public final class FoldView extends View implements SensorEventListener {
 
         canvas.drawColor(Color.BLACK);
 
-        float normalized = Math.min(1f, Math.abs(tiltRadians) / MAX_TILT);
-        float scaleX = 1f - 0.28f * normalized;
-        float pivotX = tiltRadians >= 0f ? w : 0f;
-        float shift = (tiltRadians >= 0f ? -1f : 1f) * 10f * d * normalized;
-
+        buildFoldMatrix(w, h, tiltRadians);
         int save = canvas.save();
-        canvas.translate(shift, 0f);
-        canvas.scale(scaleX, 1f, pivotX, h * 0.5f);
+        canvas.concat(foldMatrix);
         drawDashboard(canvas, d, w, h);
         canvas.restoreToCount(save);
 
         drawDebugOverlay(canvas, d, w, h);
+    }
+
+    private void buildFoldMatrix(float w, float h, float angle) {
+        float normalized = Math.min(1f, Math.abs(angle) / MAX_TILT);
+
+        // Stable projective approximation of a vertical-axis fold.
+        // The far edge remains fixed. The near edge moves inward and becomes shorter.
+        float horizontalInset = w * (0.34f * normalized);
+        float verticalInset = h * (0.07f * normalized);
+
+        src[0] = 0f; src[1] = 0f;
+        src[2] = w;  src[3] = 0f;
+        src[4] = w;  src[5] = h;
+        src[6] = 0f; src[7] = h;
+
+        if (angle >= 0f) {
+            // Right edge is the hinge / far edge.
+            dst[0] = horizontalInset; dst[1] = verticalInset;
+            dst[2] = w;               dst[3] = 0f;
+            dst[4] = w;               dst[5] = h;
+            dst[6] = horizontalInset; dst[7] = h - verticalInset;
+        } else {
+            // Left edge is the hinge / far edge.
+            dst[0] = 0f;                    dst[1] = 0f;
+            dst[2] = w - horizontalInset;   dst[3] = verticalInset;
+            dst[4] = w - horizontalInset;   dst[5] = h - verticalInset;
+            dst[6] = 0f;                    dst[7] = h;
+        }
+
+        foldMatrix.reset();
+        boolean ok = foldMatrix.setPolyToPoly(src, 0, dst, 0, 4);
+        if (!ok) foldMatrix.reset();
     }
 
     private void drawDashboard(Canvas canvas, float d, float w, float h) {
@@ -97,7 +129,7 @@ public final class FoldView extends View implements SensorEventListener {
         paint.setFakeBoldText(false);
         paint.setTextSize(16f * d);
         paint.setColor(Color.rgb(90, 90, 100));
-        canvas.drawText("LIVE TILT TRANSFORM TEST", left, 125f * d, paint);
+        canvas.drawText("PERSPECTIVE FOLD TEST", left, 125f * d, paint);
 
         paint.setColor(Color.WHITE);
         RectF card = new RectF(left, 165f * d, right, Math.min(h - 120f * d, 455f * d));
@@ -106,15 +138,15 @@ public final class FoldView extends View implements SensorEventListener {
         paint.setColor(Color.rgb(0, 122, 255));
         paint.setTextSize(22f * d);
         paint.setFakeBoldText(true);
-        canvas.drawText("Motion OK", card.left + 22f * d, card.top + 48f * d, paint);
+        canvas.drawText("Perspective OK", card.left + 22f * d, card.top + 48f * d, paint);
 
         paint.setFakeBoldText(false);
         paint.setTextSize(15f * d);
         paint.setColor(Color.rgb(70, 70, 80));
-        canvas.drawText("Tilt phone left / right", card.left + 22f * d, card.top + 88f * d, paint);
-        canvas.drawText("Canvas transform only", card.left + 22f * d, card.top + 118f * d, paint);
-        canvas.drawText("No shader / AGSL", card.left + 22f * d, card.top + 148f * d, paint);
-        canvas.drawText("No blur / glass refraction", card.left + 22f * d, card.top + 178f * d, paint);
+        canvas.drawText("Far edge remains fixed", card.left + 22f * d, card.top + 88f * d, paint);
+        canvas.drawText("Near edge folds inward", card.left + 22f * d, card.top + 118f * d, paint);
+        canvas.drawText("Projective Canvas matrix", card.left + 22f * d, card.top + 148f * d, paint);
+        canvas.drawText("No shader / blur / refraction", card.left + 22f * d, card.top + 178f * d, paint);
 
         paint.setColor(Color.rgb(52, 199, 89));
         canvas.drawCircle(card.right - 48f * d, card.top + 48f * d, 16f * d, paint);
@@ -151,7 +183,8 @@ public final class FoldView extends View implements SensorEventListener {
         paint.setFakeBoldText(true);
         canvas.drawText(sensorStatus, overlay.left + 14f * d, overlay.top + 23f * d, paint);
         paint.setFakeBoldText(false);
-        String line = "events " + sensorEvents + "   tilt " + Math.round(Math.toDegrees(tiltRadians)) + " deg";
+        String hinge = tiltRadians >= 0f ? "right hinge" : "left hinge";
+        String line = "events " + sensorEvents + "   tilt " + Math.round(Math.toDegrees(tiltRadians)) + " deg   " + hinge;
         canvas.drawText(line, overlay.left + 14f * d, overlay.top + 46f * d, paint);
     }
 
@@ -165,7 +198,7 @@ public final class FoldView extends View implements SensorEventListener {
             if (!hasReference) {
                 System.arraycopy(currentQ, 0, referenceQ, 0, 4);
                 hasReference = true;
-                sensorStatus = "Sensor + tilt active";
+                sensorStatus = "Sensor + perspective active";
                 tiltRadians = 0f;
                 invalidate();
                 return;
